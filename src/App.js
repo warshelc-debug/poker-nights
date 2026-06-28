@@ -140,6 +140,15 @@ const fmtDuration = (ms) => {
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 };
 
+const fmtTimer = (ms) => {
+  const h = Math.floor(ms / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  const s = Math.floor((ms % 60000) / 1000);
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+};
+
+const LOCATIONS = ["Jake's House", "AJ's House", "Casino", "Online"];
+
 const POSITIONS = ['BTN', 'CO', 'HJ', 'MP', 'UTG', 'BB', 'SB'];
 const RESULTS = ['Won', 'Lost', 'Split'];
 const AVATAR_COLORS = ['#e53e3e', '#d69e2e', '#38a169', '#3182ce', '#805ad5', '#dd6b20'];
@@ -585,15 +594,49 @@ function LogHandModal({ sessionId, userId, onClose, onSaved }) {
   );
 }
 
+// ─── Mini modal for Add-On and Update Stack ──────────────────────────────────
+function InputModal({ title, placeholder, onConfirm, onClose }) {
+  const [val, setVal] = useState('');
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)', zIndex: 300, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+      <div style={{ background: C.card, borderRadius: 16, padding: 24, width: '100%', maxWidth: 360 }}>
+        <h3 style={{ margin: '0 0 12px', color: C.gold }}>{title}</h3>
+        <input
+          style={S.input}
+          type="number"
+          placeholder={placeholder}
+          value={val}
+          onChange={e => setVal(e.target.value)}
+          autoFocus
+        />
+        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+          <button style={{ ...S.btn('secondary'), marginTop: 0 }} onClick={onClose}>Cancel</button>
+          <button style={{ ...S.btn(), marginTop: 0 }} onClick={() => { if (val) { onConfirm(parseFloat(val)); onClose(); } }}>Confirm</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Start Game tab ───────────────────────────────────────────────────────────
-function StartGameTab({ profile }) {
+function StartGameTab({ profile, onSessionEnd }) {
+  // Step 1: setup form state
+  const [location, setLocation] = useState(LOCATIONS[0]);
   const [buyin, setBuyin] = useState('');
+  const [sb, setSb] = useState('0.50');
+  const [bb, setBb] = useState('1.00');
+
+  // Step 2: live session state
   const [session, setSession] = useState(null);
   const [elapsed, setElapsed] = useState(0);
-  const [currentStack, setCurrentStack] = useState('');
-  const [showLogHand, setShowLogHand] = useState(false);
-  const [handCount, setHandCount] = useState(0);
+  const [totalBuyin, setTotalBuyin] = useState(0);
+  const [stackHistory, setStackHistory] = useState([]);
+  const [cashout, setCashout] = useState('');
   const [saving, setSaving] = useState(false);
+  const [modal, setModal] = useState(null); // 'addon' | 'stack'
+
+  // Step 3: summary state
+  const [summary, setSummary] = useState(null);
 
   useEffect(() => {
     if (!session) return;
@@ -603,92 +646,250 @@ function StartGameTab({ profile }) {
 
   const startSession = async () => {
     if (!buyin || isNaN(buyin)) return;
+    const initialBuyin = parseFloat(buyin);
     const start_time = new Date().toISOString();
     const { data, error } = await supabase.from('sessions').insert({
       user_id: profile.id,
-      buyin: parseFloat(buyin),
+      buyin: initialBuyin,
+      location,
+      small_blind: parseFloat(sb),
+      big_blind: parseFloat(bb),
       start_time,
       profit_loss: 0,
     }).select().single();
     if (!error) {
       setSession(data);
+      setTotalBuyin(initialBuyin);
       setElapsed(0);
+      setStackHistory([]);
     }
   };
 
+  const handleAddOn = (amount) => {
+    const newTotal = totalBuyin + amount;
+    setTotalBuyin(newTotal);
+    supabase.from('sessions').update({ buyin: newTotal }).eq('id', session.id);
+  };
+
+  const handleUpdateStack = (stack) => {
+    const pl = stack - totalBuyin;
+    const entry = { stack, pl, time: new Date().toISOString(), elapsed };
+    setStackHistory(h => [...h, entry]);
+  };
+
+  const latestStack = stackHistory.length > 0 ? stackHistory[stackHistory.length - 1] : null;
+  const currentPL = latestStack ? latestStack.pl : null;
+
   const endSession = async () => {
     setSaving(true);
-    const stack = parseFloat(currentStack) || parseFloat(session.buyin);
-    const profit_loss = stack - parseFloat(session.buyin);
+    const cashoutAmt = parseFloat(cashout) || (latestStack ? latestStack.stack : totalBuyin);
+    const profit_loss = cashoutAmt - totalBuyin;
+    const end_time = new Date().toISOString();
     await supabase.from('sessions').update({
-      end_time: new Date().toISOString(),
+      end_time,
       profit_loss,
+      cashout: cashoutAmt,
+      buyin: totalBuyin,
     }).eq('id', session.id);
+    setSummary({
+      duration: elapsed,
+      totalBuyin,
+      cashout: cashoutAmt,
+      profit_loss,
+      stackUpdates: stackHistory.length,
+      location: session.location,
+      sb: session.small_blind,
+      bb: session.big_blind,
+    });
     setSession(null);
-    setBuyin('');
-    setCurrentStack('');
-    setHandCount(0);
     setSaving(false);
   };
 
+  // ── Step 3: Summary ──
+  if (summary) {
+    return (
+      <div style={S.screen}>
+        <div style={S.header}>
+          <span style={S.headerTitle}>♠ Session Over</span>
+        </div>
+        <div style={{ padding: 16 }}>
+          <div style={{ ...S.card, textAlign: 'center', borderColor: summary.profit_loss >= 0 ? C.green : C.red }}>
+            <div style={{ fontSize: 13, color: C.textDim, marginBottom: 4 }}>Final Result</div>
+            <div style={{ fontSize: 48, fontWeight: 700, color: summary.profit_loss >= 0 ? C.green : C.red }}>
+              {fmt$(summary.profit_loss)}
+            </div>
+            <div style={{ color: C.textDim, fontSize: 13, marginTop: 4 }}>{summary.location}</div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 12 }}>
+            {[
+              ['Duration', fmtTimer(summary.duration)],
+              ['Total Buyin', `$${summary.totalBuyin.toFixed(2)}`],
+              ['Cashout', `$${summary.cashout.toFixed(2)}`],
+              ['Stack Updates', summary.stackUpdates],
+              ['Blinds', `$${summary.sb}/$${summary.bb}`],
+            ].map(([k, v]) => (
+              <div key={k} style={{ ...S.card, margin: 0, textAlign: 'center' }}>
+                <div style={{ color: C.textDim, fontSize: 11 }}>{k}</div>
+                <div style={{ fontWeight: 700, fontSize: 16, color: C.gold }}>{v}</div>
+              </div>
+            ))}
+          </div>
+
+          <button style={S.btn()} onClick={() => {
+            setSummary(null);
+            setBuyin('');
+            setCashout('');
+            setStackHistory([]);
+            if (onSessionEnd) onSessionEnd();
+          }}>
+            View Leaderboard ♠
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Step 1: Setup ──
   if (!session) {
     return (
       <div style={S.screen}>
         <div style={S.header}>
           <span style={S.headerTitle}>♦ Start Game</span>
         </div>
-        <div style={{ padding: 24, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-          <div style={{ fontSize: 64, marginBottom: 8 }}>🃏</div>
-          <h2 style={{ color: C.gold, marginBottom: 24 }}>Ready to play?</h2>
-          <div style={{ ...S.card, width: '100%' }}>
-            <label style={{ ...S.label, marginTop: 0 }}>Buy-in Amount ($)</label>
+        <div style={{ padding: 16 }}>
+          <div style={{ fontSize: 48, textAlign: 'center', marginBottom: 4 }}>🃏</div>
+          <div style={S.card}>
+            <label style={{ ...S.label, marginTop: 0 }}>Location</label>
+            <select
+              style={{ ...S.input, appearance: 'none' }}
+              value={location}
+              onChange={e => setLocation(e.target.value)}
+            >
+              {LOCATIONS.map(l => <option key={l} value={l}>{l}</option>)}
+            </select>
+
+            <label style={S.label}>Buy-in Amount ($)</label>
             <input style={S.input} type="number" value={buyin} onChange={e => setBuyin(e.target.value)} placeholder="100" />
-            <button style={S.btn()} onClick={startSession} disabled={!buyin}>Start Session ♠</button>
+
+            <label style={S.label}>Blinds</label>
+            <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 11, color: C.textDim, marginBottom: 4 }}>Small Blind</div>
+                <input style={{ ...S.input, marginTop: 0 }} type="number" value={sb} onChange={e => setSb(e.target.value)} placeholder="0.50" />
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 11, color: C.textDim, marginBottom: 4 }}>Big Blind</div>
+                <input style={{ ...S.input, marginTop: 0 }} type="number" value={bb} onChange={e => setBb(e.target.value)} placeholder="1.00" />
+              </div>
+            </div>
+
+            <button style={{ ...S.btn(), marginTop: 20 }} onClick={startSession} disabled={!buyin}>
+              Start Session ♠
+            </button>
           </div>
         </div>
       </div>
     );
   }
 
-  const plValue = currentStack !== '' ? parseFloat(currentStack) - parseFloat(session.buyin) : null;
-
+  // ── Step 2: Live session ──
   return (
     <div style={S.screen}>
       <div style={S.header}>
         <span style={S.headerTitle}>♦ Live Session</span>
-        <span style={{ background: C.red, color: '#fff', borderRadius: 6, padding: '2px 8px', fontSize: 12, fontWeight: 700 }}>LIVE</span>
+        <span style={{ background: C.red, color: '#fff', borderRadius: 6, padding: '2px 8px', fontSize: 12, fontWeight: 700 }}>● LIVE</span>
       </div>
       <div style={{ padding: 16 }}>
+
+        {/* Timer card */}
         <div style={{ ...S.card, textAlign: 'center', borderColor: C.gold }}>
-          <div style={{ fontSize: 12, color: C.textDim }}>TIME IN SESSION</div>
-          <div style={{ fontSize: 36, fontWeight: 700, color: C.gold, fontVariantNumeric: 'tabular-nums' }}>{fmtDuration(elapsed)}</div>
-          <div style={{ fontSize: 12, color: C.textDim, marginTop: 4 }}>Buy-in: ${session.buyin} · {handCount} hands logged</div>
+          <div style={{ fontSize: 11, color: C.textDim, letterSpacing: 1, textTransform: 'uppercase' }}>Time in Session</div>
+          <div style={{ fontSize: 40, fontWeight: 700, color: C.gold, fontVariantNumeric: 'tabular-nums', letterSpacing: 2 }}>
+            {fmtTimer(elapsed)}
+          </div>
+          <div style={{ fontSize: 12, color: C.textDim, marginTop: 2 }}>
+            {session.location} · ${session.small_blind}/${session.big_blind}
+          </div>
         </div>
 
-        <div style={S.card}>
-          <label style={{ ...S.label, marginTop: 0 }}>Current Stack ($)</label>
-          <input style={S.input} type="number" value={currentStack} onChange={e => setCurrentStack(e.target.value)} placeholder={String(session.buyin)} />
-          {plValue !== null && (
-            <div style={{ marginTop: 8, textAlign: 'center', fontSize: 28, fontWeight: 700, color: plValue >= 0 ? C.green : C.red }}>
-              {fmt$(plValue)}
+        {/* Buyin + P/L row */}
+        <div style={{ display: 'flex', gap: 10, marginBottom: 12 }}>
+          <div style={{ ...S.card, flex: 1, margin: 0, textAlign: 'center' }}>
+            <div style={{ fontSize: 11, color: C.textDim }}>Total Buyin</div>
+            <div style={{ fontWeight: 700, fontSize: 20, color: C.text }}>${totalBuyin.toFixed(2)}</div>
+          </div>
+          <div style={{ ...S.card, flex: 1, margin: 0, textAlign: 'center' }}>
+            <div style={{ fontSize: 11, color: C.textDim }}>Current P/L</div>
+            <div style={{ fontWeight: 700, fontSize: 20, color: currentPL === null ? C.textDim : currentPL >= 0 ? C.green : C.red }}>
+              {currentPL === null ? '—' : fmt$(currentPL)}
             </div>
-          )}
+          </div>
         </div>
 
-        <button style={S.btn('secondary')} onClick={() => setShowLogHand(true)}>
-          + Log Hand ♣
-        </button>
-        <button style={{ ...S.btn('danger'), marginTop: 16 }} onClick={endSession} disabled={saving}>
+        {/* Action buttons */}
+        <div style={{ display: 'flex', gap: 10, marginBottom: 12 }}>
+          <button
+            style={{ flex: 1, padding: '12px 0', borderRadius: 10, border: `1px solid ${C.cardBorder}`, background: C.cardBorder, color: C.white, fontWeight: 700, fontSize: 14, cursor: 'pointer' }}
+            onClick={() => setModal('addon')}
+          >
+            + Add On
+          </button>
+          <button
+            style={{ flex: 1, padding: '12px 0', borderRadius: 10, border: `1px solid ${C.gold}`, background: 'transparent', color: C.gold, fontWeight: 700, fontSize: 14, cursor: 'pointer' }}
+            onClick={() => setModal('stack')}
+          >
+            Update Stack
+          </button>
+        </div>
+
+        {/* Stack history */}
+        {stackHistory.length > 0 && (
+          <div style={S.card}>
+            <div style={{ fontSize: 12, color: C.textDim, marginBottom: 8, fontWeight: 700 }}>STACK HISTORY</div>
+            <div style={{ maxHeight: 160, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {[...stackHistory].reverse().map((entry, i) => (
+                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 13 }}>
+                  <span style={{ color: C.textDim }}>{fmtTimer(entry.elapsed)}</span>
+                  <span style={{ color: C.text }}>${entry.stack.toFixed(2)}</span>
+                  <span style={{ color: entry.pl >= 0 ? C.green : C.red, fontWeight: 700 }}>{fmt$(entry.pl)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Cashout + End Session */}
+        <div style={S.card}>
+          <label style={{ ...S.label, marginTop: 0 }}>Cashout Amount ($)</label>
+          <input
+            style={S.input}
+            type="number"
+            value={cashout}
+            onChange={e => setCashout(e.target.value)}
+            placeholder={latestStack ? String(latestStack.stack.toFixed(2)) : String(totalBuyin.toFixed(2))}
+          />
+        </div>
+
+        <button style={{ ...S.btn('danger'), marginTop: 4 }} onClick={endSession} disabled={saving}>
           {saving ? 'Saving...' : 'End Session'}
         </button>
       </div>
 
-      {showLogHand && (
-        <LogHandModal
-          sessionId={session.id}
-          userId={profile.id}
-          onClose={() => setShowLogHand(false)}
-          onSaved={() => setHandCount(c => c + 1)}
+      {modal === 'addon' && (
+        <InputModal
+          title="+ Add On"
+          placeholder="Amount to add ($)"
+          onConfirm={handleAddOn}
+          onClose={() => setModal(null)}
+        />
+      )}
+      {modal === 'stack' && (
+        <InputModal
+          title="Update Stack"
+          placeholder="Current chip stack ($)"
+          onConfirm={handleUpdateStack}
+          onClose={() => setModal(null)}
         />
       )}
     </div>
@@ -799,7 +1000,7 @@ export default function App() {
       <div style={S.screen}>
         {tab === 'leaderboard' && <LeaderboardTab />}
         {tab === 'mystats' && <MyStatsTab profile={profile} />}
-        {tab === 'startgame' && <StartGameTab profile={profile} />}
+        {tab === 'startgame' && <StartGameTab profile={profile} onSessionEnd={() => setTab('leaderboard')} />}
         {tab === 'profile' && <ProfileTab profile={profile} onSignOut={handleSignOut} />}
       </div>
       <nav style={S.nav}>

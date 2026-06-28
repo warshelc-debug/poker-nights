@@ -1,5 +1,16 @@
 # PokerNights — Session Memory
 
+## What has been built (Session 2 — 2026-06-28)
+- Start Game tab completely rebuilt (3-step flow: setup → live → summary)
+- New pre-game setup: Location dropdown (Jake's House / AJ's House / Casino / Online), Buy-in, Small Blind / Big Blind inputs
+- Live session: HH:MM:SS timer, Add On modal, Update Stack modal with timestamped history, real-time P/L display
+- Stack history list (scrollable, shows time + stack + P/L per update)
+- Cashout input + End Session saves location, blinds, cashout, buyin, profit_loss to Supabase
+- Post-session summary card with "View Leaderboard" button that switches tabs
+- sessions table needs 3 new columns: `location`, `small_blind`, `big_blind`, `cashout` — see SQL below
+- .env Supabase URL fixed (removed erroneous /rest/v1/ suffix)
+- Build verified clean
+
 ## What has been built (Session 1 — 2026-06-27)
 - Full React app scaffolded via Create React App
 - `@supabase/supabase-js` installed
@@ -23,14 +34,25 @@
 See SQL section below. Tables not yet created — user must run SQL in Supabase dashboard.
 
 ## Known issues / next steps
-- User must create a Supabase project, copy URL + anon key into `.env`
-- Must run the SQL schema in Supabase dashboard
-- Must push to GitHub and connect Vercel for deployment
+- Run the ALTER TABLE SQL below to add new sessions columns
+- Push to GitHub + Vercel to deploy updated Start Game tab
 - Email confirmation may be required depending on Supabase project settings (can disable in Auth > Settings)
 
 ---
 
-## Supabase table schemas
+## Supabase schema migrations
+
+### Session 2 — ALTER TABLE (run this in Supabase SQL Editor)
+```sql
+alter table sessions add column if not exists location text;
+alter table sessions add column if not exists small_blind numeric default 0.5;
+alter table sessions add column if not exists big_blind numeric default 1.0;
+alter table sessions add column if not exists cashout numeric;
+```
+
+---
+
+## Supabase table schemas (original — Session 1)
 
 ```sql
 -- profiles
