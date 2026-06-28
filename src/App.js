@@ -266,7 +266,7 @@ function Avatar({ profile, size = 36 }) {
 }
 
 // ─── Leaderboard tab ─────────────────────────────────────────────────────────
-function LeaderboardTab() {
+function LeaderboardTab({ refreshKey }) {
   const [period, setPeriod] = useState('monthly');
   const [players, setPlayers] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -320,7 +320,7 @@ function LeaderboardTab() {
     setLoading(false);
   }, [period]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); }, [load, refreshKey]);
 
   const openPlayer = async (player) => {
     setSelected(player);
@@ -407,25 +407,26 @@ function LeaderboardTab() {
 }
 
 // ─── My Stats tab ─────────────────────────────────────────────────────────────
-function MyStatsTab({ profile }) {
+function MyStatsTab({ profile, onDataChanged }) {
   const [sessions, setSessions] = useState([]);
   const [hands, setHands] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedSession, setSelectedSession] = useState(null);
   const [sessionHands, setSessionHands] = useState([]);
+  const [editingSession, setEditingSession] = useState(null);
 
-  useEffect(() => {
+  const loadData = useCallback(async () => {
     if (!profile) return;
-    (async () => {
-      const [{ data: s }, { data: h }] = await Promise.all([
-        supabase.from('sessions').select('*').eq('user_id', profile.id).order('created_at', { ascending: false }),
-        supabase.from('hands').select('*').eq('user_id', profile.id),
-      ]);
-      setSessions(s || []);
-      setHands(h || []);
-      setLoading(false);
-    })();
+    const [{ data: s }, { data: h }] = await Promise.all([
+      supabase.from('sessions').select('*').eq('user_id', profile.id).order('created_at', { ascending: false }),
+      supabase.from('hands').select('*').eq('user_id', profile.id),
+    ]);
+    setSessions(s || []);
+    setHands(h || []);
+    setLoading(false);
   }, [profile]);
+
+  useEffect(() => { loadData(); }, [loadData]);
 
   const totalPL = sessions.reduce((a, s) => a + (s.profit_loss || 0), 0);
   const wins = sessions.filter(s => (s.profit_loss || 0) > 0).length;
@@ -484,6 +485,14 @@ function MyStatsTab({ profile }) {
         <span style={S.headerTitle}>♥ My Stats</span>
       </div>
       <div style={{ padding: 16 }}>
+        {editingSession && (
+          <EditSessionModal
+            session={editingSession}
+            onClose={() => setEditingSession(null)}
+            onSaved={() => { loadData(); if (onDataChanged) onDataChanged(); }}
+            onDeleted={() => { loadData(); if (onDataChanged) onDataChanged(); }}
+          />
+        )}
         {loading ? <p style={{ color: C.textDim, textAlign: 'center' }}>Loading...</p> : (
           <>
             <div style={{ textAlign: 'center', marginBottom: 20 }}>
@@ -505,12 +514,22 @@ function MyStatsTab({ profile }) {
             </div>
             <h3 style={{ color: C.gold }}>Recent Sessions</h3>
             {sessions.length === 0 ? <p style={{ color: C.textDim }}>No sessions yet. Start playing!</p> : sessions.map(s => (
-              <div key={s.id} style={{ ...S.card, display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }} onClick={() => openSession(s)}>
-                <div>
-                  <div style={{ fontWeight: 700 }}>{new Date(s.created_at).toLocaleDateString()}</div>
-                  <div style={{ color: C.textDim, fontSize: 12 }}>Buyin: ${s.buyin} · {s.start_time && s.end_time ? fmtDuration(new Date(s.end_time) - new Date(s.start_time)) : '—'}</div>
+              <div key={s.id} style={{ ...S.card, cursor: 'pointer' }} onClick={() => openSession(s)}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div>
+                    <div style={{ fontWeight: 700 }}>{new Date(s.created_at).toLocaleDateString()}{s.location ? ` · ${s.location}` : ''}</div>
+                    <div style={{ color: C.textDim, fontSize: 12 }}>Buyin: ${s.buyin} · {s.start_time && s.end_time ? fmtDuration(new Date(s.end_time) - new Date(s.start_time)) : '—'}</div>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={S.badge(s.profit_loss >= 0 ? C.green : C.red)}>{fmt$(s.profit_loss)}</span>
+                    <button
+                      onClick={e => { e.stopPropagation(); setEditingSession(s); }}
+                      style={{ background: 'none', border: `1px solid ${C.cardBorder}`, borderRadius: 6, color: C.textDim, cursor: 'pointer', padding: '4px 8px', fontSize: 14, lineHeight: 1 }}
+                    >
+                      ✏️
+                    </button>
+                  </div>
                 </div>
-                <span style={S.badge(s.profit_loss >= 0 ? C.green : C.red)}>{fmt$(s.profit_loss)}</span>
               </div>
             ))}
           </>
@@ -589,6 +608,126 @@ function LogHandModal({ sessionId, userId, onClose, onSaved }) {
         <input style={S.input} type="number" value={form.pot_size} onChange={e => set('pot_size', e.target.value)} placeholder="0.00" />
 
         <button style={S.btn()} onClick={save} disabled={saving}>{saving ? 'Saving...' : 'Save Hand ♠'}</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Edit Session modal ───────────────────────────────────────────────────────
+function EditSessionModal({ session, onClose, onSaved, onDeleted }) {
+  const [form, setForm] = useState({
+    location: session.location || LOCATIONS[0],
+    buyin: String(session.buyin ?? ''),
+    small_blind: String(session.small_blind ?? '0.50'),
+    big_blind: String(session.big_blind ?? '1.00'),
+    cashout: String(session.cashout ?? ''),
+    profit_loss: String(session.profit_loss ?? ''),
+  });
+  const [manualPL, setManualPL] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  const set = (k, v) => {
+    setForm(f => {
+      const next = { ...f, [k]: v };
+      if ((k === 'buyin' || k === 'cashout') && !manualPL) {
+        const b = parseFloat(k === 'buyin' ? v : next.buyin);
+        const c = parseFloat(k === 'cashout' ? v : next.cashout);
+        if (!isNaN(b) && !isNaN(c)) next.profit_loss = String((c - b).toFixed(2));
+      }
+      return next;
+    });
+  };
+
+  const save = async () => {
+    setSaving(true);
+    await supabase.from('sessions').update({
+      location: form.location,
+      buyin: parseFloat(form.buyin) || 0,
+      small_blind: parseFloat(form.small_blind) || 0,
+      big_blind: parseFloat(form.big_blind) || 0,
+      cashout: parseFloat(form.cashout) || null,
+      profit_loss: parseFloat(form.profit_loss) || 0,
+    }).eq('id', session.id);
+    onSaved();
+    onClose();
+    setSaving(false);
+  };
+
+  const del = async () => {
+    setSaving(true);
+    await supabase.from('sessions').delete().eq('id', session.id);
+    onDeleted();
+    onClose();
+    setSaving(false);
+  };
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', zIndex: 300, display: 'flex', alignItems: 'flex-end' }}>
+      <div style={{ background: C.card, borderRadius: '16px 16px 0 0', padding: 20, width: '100%', maxWidth: 480, margin: '0 auto', maxHeight: '90vh', overflowY: 'auto' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+          <h3 style={{ margin: 0, color: C.gold }}>✏️ Edit Session</h3>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', color: C.textDim, fontSize: 22, cursor: 'pointer' }}>✕</button>
+        </div>
+
+        <label style={S.label}>Location</label>
+        <select style={{ ...S.input, appearance: 'none' }} value={form.location} onChange={e => set('location', e.target.value)}>
+          {LOCATIONS.map(l => <option key={l} value={l}>{l}</option>)}
+        </select>
+
+        <label style={S.label}>Buy-in ($)</label>
+        <input style={S.input} type="number" value={form.buyin} onChange={e => set('buyin', e.target.value)} placeholder="100" />
+
+        <label style={S.label}>Blinds</label>
+        <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 11, color: C.textDim, marginBottom: 4 }}>Small</div>
+            <input style={{ ...S.input, marginTop: 0 }} type="number" value={form.small_blind} onChange={e => set('small_blind', e.target.value)} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 11, color: C.textDim, marginBottom: 4 }}>Big</div>
+            <input style={{ ...S.input, marginTop: 0 }} type="number" value={form.big_blind} onChange={e => set('big_blind', e.target.value)} />
+          </div>
+        </div>
+
+        <label style={S.label}>Cashout ($)</label>
+        <input style={S.input} type="number" value={form.cashout} onChange={e => set('cashout', e.target.value)} placeholder="0" />
+
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 10 }}>
+          <label style={{ ...S.label, marginTop: 0 }}>Profit / Loss ($)</label>
+          <button
+            onClick={() => setManualPL(m => !m)}
+            style={{ background: 'none', border: 'none', color: manualPL ? C.gold : C.textDim, fontSize: 11, cursor: 'pointer', padding: 0 }}
+          >
+            {manualPL ? '● manual' : '○ auto'}
+          </button>
+        </div>
+        <input
+          style={{ ...S.input, color: parseFloat(form.profit_loss) >= 0 ? C.green : C.red }}
+          type="number"
+          value={form.profit_loss}
+          onChange={e => { setManualPL(true); set('profit_loss', e.target.value); }}
+          placeholder="0"
+          readOnly={!manualPL}
+        />
+
+        <button style={{ ...S.btn(), marginTop: 16 }} onClick={save} disabled={saving}>
+          {saving ? 'Saving...' : 'Save Changes'}
+        </button>
+
+        {!confirmDelete ? (
+          <button style={{ ...S.btn('danger'), marginTop: 8 }} onClick={() => setConfirmDelete(true)}>
+            Delete Session
+          </button>
+        ) : (
+          <div style={{ ...S.card, marginTop: 8, border: `1px solid ${C.red}` }}>
+            <div style={{ color: C.red, fontWeight: 700, marginBottom: 10 }}>Delete this session permanently?</div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button style={{ ...S.btn('secondary'), marginTop: 0 }} onClick={() => setConfirmDelete(false)}>Cancel</button>
+              <button style={{ ...S.btn('danger'), marginTop: 0 }} onClick={del} disabled={saving}>Yes, Delete</button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -950,6 +1089,7 @@ export default function App() {
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState('leaderboard');
+  const [refreshKey, setRefreshKey] = useState(0);
 
   const loadProfile = useCallback(async (u) => {
     setUser(u);
@@ -998,8 +1138,8 @@ export default function App() {
   return (
     <div style={S.app}>
       <div style={S.screen}>
-        {tab === 'leaderboard' && <LeaderboardTab />}
-        {tab === 'mystats' && <MyStatsTab profile={profile} />}
+        {tab === 'leaderboard' && <LeaderboardTab refreshKey={refreshKey} />}
+        {tab === 'mystats' && <MyStatsTab profile={profile} onDataChanged={() => setRefreshKey(k => k + 1)} />}
         {tab === 'startgame' && <StartGameTab profile={profile} onSessionEnd={() => setTab('leaderboard')} />}
         {tab === 'profile' && <ProfileTab profile={profile} onSignOut={handleSignOut} />}
       </div>

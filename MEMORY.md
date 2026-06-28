@@ -1,5 +1,14 @@
 # PokerNights — Session Memory
 
+## What has been built (Session 3 — 2026-06-28)
+- Edit session modal: pencil button on every session card in My Stats
+- Editable fields: Location, Buy-in, Small/Big Blind, Cashout, Profit/Loss
+- P/L auto-calculates from Buyin + Cashout; toggle to manual override
+- Delete session with confirmation prompt
+- After save or delete: session list reloads + leaderboard refreshes (refreshKey pattern)
+- Leaderboard now accepts refreshKey prop to force re-fetch on data changes
+- No new SQL needed — uses existing columns from Session 2 migrations
+
 ## What has been built (Session 2 — 2026-06-28)
 - Start Game tab completely rebuilt (3-step flow: setup → live → summary)
 - New pre-game setup: Location dropdown (Jake's House / AJ's House / Casino / Online), Buy-in, Small Blind / Big Blind inputs
@@ -41,6 +50,11 @@ See SQL section below. Tables not yet created — user must run SQL in Supabase 
 ---
 
 ## Supabase schema migrations
+
+### Session 3 — Add delete policy (run this in Supabase SQL Editor)
+```sql
+create policy "Users can delete own sessions" on sessions for delete using (auth.uid() = user_id);
+```
 
 ### Session 2 — ALTER TABLE (run this in Supabase SQL Editor)
 ```sql
